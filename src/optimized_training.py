@@ -365,7 +365,7 @@ def train_asr_model(
         num_train_epochs=training_config.num_train_epochs,
         fp16=training_config.fp16,
         gradient_checkpointing=training_config.gradient_checkpointing,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=training_config.eval_steps,
         save_steps=training_config.save_steps,
         logging_steps=training_config.logging_steps,
