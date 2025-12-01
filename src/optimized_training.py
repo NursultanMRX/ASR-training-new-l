@@ -32,19 +32,6 @@ from datasets import load_dataset, Audio, DatasetDict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 from pathlib import Path
-from evaluate import load
-import torch
-import numpy as np
-import json
-import psutil
-import gc
-import warnings
-warnings.filterwarnings('ignore')
-
-
-# ============================================================================
-# MEMORY UTILITIES
-# ============================================================================
 
 def get_memory_info():
     """Get current memory usage."""
@@ -106,11 +93,68 @@ def train_asr_model(
     safety_margin: float = 0.85,
     use_deepspeed: bool = False,
     push_to_hub: bool = True,
-    resume_from_checkpoint: Optional[str] = None
+    resume_from_checkpoint: Optional[str] = None,
+    skip_health_check: bool = False
 ):
     """
-    Main entry point for ASR training.
+    Main entry point for ASR training with comprehensive error recovery.
+    
+    Args:
+        dataset_repo: HuggingFace dataset repository ID
+        base_model: Base model to fine-tune
+        output_name: Output directory name
+        hf_username: HuggingFace username (auto-detected if None)
+        num_epochs: Number of training epochs
+        target_batch_size: Target effective batch size
+        learning_rate: Learning rate
+        safety_margin: Memory safety margin (0.0-1.0)
+        use_deepspeed: Enable DeepSpeed ZeRO-2 optimization
+        push_to_hub: Push model to HuggingFace Hub after training
+        resume_from_checkpoint: Path to checkpoint to resume from
+        skip_health_check: Skip pre-flight health checks (not recommended)
     """
+    
+    # ============================================================================
+    # 0. PRE-FLIGHT CHECKS & ERROR RECOVERY SETUP
+    # ============================================================================
+    
+    print("\n" + "="*80)
+    print("ASR TRAINING SYSTEM - BULLETPROOF MODE".center(80))
+    print("="*80)
+    
+    # Run health checks
+    if RECOVERY_AVAILABLE and not skip_health_check:
+        print("\n🏥 Running pre-flight health checks...")
+        checker, health_results = run_health_check()
+        
+        critical_ok = health_results.get("dependencies", False) and \
+                     health_results.get("internet", False) and \
+                     health_results.get("permissions", False)
+                     
+        if not critical_ok:
+            raise RuntimeError("❌ Critical health checks failed! Fix issues above and try again.")
+    else:
+        print("\n⚠️ Skipping health checks (not recommended)")
+    
+    # Activate Colab keep-alive if in Colab
+    keepalive = None
+    if RECOVERY_AVAILABLE:
+        keepalive = activate_colab_keepalive()
+    
+    # Setup error recovery
+    recovery = None
+    checkpoint_mgr = None
+    if RECOVERY_AVAILABLE:
+        recovery = ErrorRecovery(max_retries=3, checkpoint_dir=output_name)
+        recovery.setup_signal_handlers()
+        checkpoint_mgr = CheckpointManager(checkpoint_dir=output_name)
+        
+        # Check for existing checkpoint to resume
+        if resume_from_checkpoint is None:
+            latest = checkpoint_mgr.find_latest_checkpoint()
+            if latest:
+                resume_from_checkpoint = str(latest)
+                print(f"🔄 Will resume from: {resume_from_checkpoint}")
     
     # 1. Setup
     if hf_username is None:
