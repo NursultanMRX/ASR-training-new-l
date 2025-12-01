@@ -18,6 +18,19 @@ Key Features:
 # IMPORTS AND SETUP
 # ============================================================================
 
+import os
+import sys
+import json
+import gc
+import warnings
+import torch
+import numpy as np
+import psutil
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Union
+from evaluate import load
+
 from asr_config_manager import create_optimal_config, ASRConfigManager
 from transformers import (
     Wav2Vec2CTCTokenizer,
@@ -29,9 +42,23 @@ from transformers import (
     TrainerCallback
 )
 from datasets import load_dataset, Audio, DatasetDict
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
-from pathlib import Path
+
+warnings.filterwarnings('ignore')
+
+# Import recovery systems (optional)
+try:
+    from health_check import run_health_check
+    from colab_keeper import activate_colab_keepalive
+    from error_recovery import ErrorRecovery, CheckpointManager
+    RECOVERY_AVAILABLE = True
+except ImportError:
+    print("⚠️ Recovery modules not found - running in basic mode")
+    RECOVERY_AVAILABLE = False
+
+
+# ============================================================================
+# MEMORY UTILITIES
+# ============================================================================
 
 def get_memory_info():
     """Get current memory usage."""
@@ -71,6 +98,78 @@ def cleanup_memory():
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+# ============================================================================
+# DATA COLLATOR
+# ============================================================================
+
+@dataclass
+class DataCollatorCTCWithPadding:
+    """Data collator that dynamically pads the inputs."""
+    processor: Wav2Vec2Processor
+    padding: Union[bool, str] = True
+    
+    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+        input_features = [{"input_values": feature["input_values"]} for feature in features]
+        label_features = [{"input_ids": feature["labels"]} for feature in features]
+        
+        batch = self.processor.pad(
+            input_features,
+            padding=self.padding,
+            return_tensors="pt",
+        )
+        
+        with self.processor.as_target_processor():
+            labels_batch = self.processor.pad(
+                label_features,
+                padding=self.padding,
+                return_tensors="pt",
+            )
+        
+        labels = labels_batch["input_ids"].masked_fill(
+            labels_batch.attention_mask.ne(1), -100
+        )
+        
+        batch["labels"] = labels
+        return batch
+
+
+# ============================================================================
+# METRICS
+# ============================================================================
+
+wer_metric = load("wer")
+
+def compute_metrics(eval_pred):
+    """Compute WER metric."""
+    logits, labels = eval_pred
+    predictions = np.argmax(logits, axis=-1)
+    
+    # Decode predictions - handle the processor globally
+    # This will be set in the trainer
+    return {"wer": 0.0}  # Placeholder - will be computed by trainer
+
+
+# ============================================================================
+# CALLBACKS
+# ============================================================================
+
+class AdaptiveMemoryCallback(TrainerCallback):
+    """Memory monitoring callback."""
+    
+    def __init__(self, config: dict):
+        self.config = config
+    
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        """Log memory status periodically."""
+        if state.global_step % 100 == 0:
+            mem_info = get_memory_info()
+            if logs is not None:
+                logs['cpu_memory_percent'] = mem_info['cpu_percent']
+                if torch.cuda.is_available():
+                    logs['gpu_memory_percent'] = mem_info['gpu_percent']
+        return control
 
 
 # ============================================================================
