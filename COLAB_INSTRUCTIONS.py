@@ -6,7 +6,7 @@
 # CELL 1: Install Everything
 # ============================================
 print("📦 Installing packages (2-3 minutes)...")
-!pip install -q transformers datasets accelerate torchaudio librosa jiwer evaluate psutil soundfile
+!pip install -q transformers datasets accelerate torchaudio torchcodec librosa jiwer evaluate psutil soundfile
 print("✅ Installation complete!")
 
 # ============================================

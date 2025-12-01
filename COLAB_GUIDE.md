@@ -11,7 +11,7 @@
 ### Cell 1: Install
 ```python
 print("📦 Installing packages...")
-!pip install -q transformers datasets accelerate torchaudio librosa jiwer evaluate psutil soundfile
+!pip install -q transformers datasets accelerate torchaudio torchcodec librosa jiwer evaluate psutil soundfile
 print("✅ Done!")
 ```
 
