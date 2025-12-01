@@ -90,498 +90,184 @@ def cleanup_memory():
 # CONFIGURATION
 # ============================================================================
 
-# Dataset configuration
-DATASET_REPO_ID = "nickoo004/karakalpak-speech-60h-production-v2"
-SAMPLE_RATE = 16000
-
-# Model configuration
-BASE_MODEL = "facebook/wav2vec2-xls-r-1b"
-MODEL_NAME = "wav2vec2-xls-r-1b-karakalpak-v2-60h"
-HF_USERNAME = "nickoo004"
-
-# Training configuration (will be overridden by auto-config)
-NUM_EPOCHS = 20
-TARGET_BATCH_SIZE = 32
-LEARNING_RATE = 3e-4
-
 
 # ============================================================================
-# LOAD DATASET
+# MAIN TRAINING FUNCTION
 # ============================================================================
 
-print(f"Loading dataset: {DATASET_REPO_ID}")
-print("This may take a few minutes...\n")
-
-raw_datasets = load_dataset(DATASET_REPO_ID, token=True)
-raw_datasets = raw_datasets.cast_column("audio", Audio(sampling_rate=SAMPLE_RATE))
-raw_datasets = raw_datasets["train"].train_test_split(test_size=0.1, seed=42)
-
-print(f"\n✅ Dataset loaded!")
-print(f"Train samples: {len(raw_datasets['train'])}")
-print(f"Test samples: {len(raw_datasets['test'])}")
-
-print_memory_status("After dataset loading")
-cleanup_memory()
-
-
-# ============================================================================
-# CREATE VOCABULARY AND PROCESSOR
-# ============================================================================
-
-def extract_all_chars(batch):
-    """Extract all unique characters from text."""
-    all_text = " ".join(batch["sentence"])
-    vocab = list(sorted(set(all_text)))
-    return {"vocab": [vocab], "all_text": [all_text]}
-
-
-print("\nExtracting vocabulary from dataset...")
-
-vocabs = raw_datasets.map(
-    extract_all_chars,
-    batched=True,
-    batch_size=1000,
-    keep_in_memory=False,
-    remove_columns=raw_datasets.column_names["train"]
-)
-
-vocab_list = list(sorted(set(vocabs["train"]["vocab"][0]) | set(vocabs["test"]["vocab"][0])))
-vocab_dict = {v: k for k, v in enumerate(vocab_list)}
-vocab_dict["|"] = vocab_dict.get(" ", len(vocab_dict))
-if " " in vocab_dict:
-    del vocab_dict[" "]
-vocab_dict["[UNK]"] = len(vocab_dict)
-vocab_dict["[PAD]"] = len(vocab_dict)
-
-print(f"Vocabulary size: {len(vocab_dict)}")
-
-# Save vocabulary
-vocab_path = Path("vocab.json")
-with open(vocab_path, "w", encoding="utf-8") as vocab_file:
-    json.dump(vocab_dict, vocab_file, ensure_ascii=False, indent=2)
-
-# Create processor
-tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(
-    "./",
-    unk_token="[UNK]",
-    pad_token="[PAD]",
-    word_delimiter_token="|"
-)
-
-feature_extractor = Wav2Vec2FeatureExtractor(
-    feature_size=1,
-    sampling_rate=SAMPLE_RATE,
-    padding_value=0.0,
-    do_normalize=True,
-    return_attention_mask=True
-)
-
-processor = Wav2Vec2Processor(
-    feature_extractor=feature_extractor,
-    tokenizer=tokenizer
-)
-
-processor.save_pretrained("processor")
-print("✅ Processor created and saved!")
-
-cleanup_memory()
-
-
-# ============================================================================
-# LOAD MODEL
-# ============================================================================
-
-print(f"\n🔄 Loading model: {BASE_MODEL}")
-
-model = Wav2Vec2ForCTC.from_pretrained(
-    BASE_MODEL,
-    attention_dropout=0.1,
-    hidden_dropout=0.1,
-    feat_proj_dropout=0.0,
-    mask_time_prob=0.05,
-    layerdrop=0.1,
-    ctc_loss_reduction="mean",
-    pad_token_id=processor.tokenizer.pad_token_id,
-    vocab_size=len(processor.tokenizer),
-    gradient_checkpointing=True
-)
-
-model.freeze_feature_encoder()
-
-if torch.cuda.is_available():
-    model = model.cuda()
-
-print("✅ Model loaded!")
-print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-
-print_memory_status("After model loading")
-
-
-# ============================================================================
-# AUTO-CONFIGURE TRAINING (HIGH ARCHITECTURE!)
-# ============================================================================
-
-print("\n" + "="*80)
-print("GENERATING OPTIMIZED CONFIGURATION".center(80))
-print("="*80)
-
-# This automatically profiles hardware, dataset, and model
-# Then generates optimal configuration!
-training_config, config_manager = create_optimal_config(
-    dataset=raw_datasets['train'],
-    model=model,
-    model_name=MODEL_NAME,
-    num_epochs=NUM_EPOCHS,
-    target_batch_size=TARGET_BATCH_SIZE,
-    learning_rate=LEARNING_RATE,
-    safety_margin=0.85  # Use 85% of available memory
-)
-
-# Save configuration for future reference
-config_manager.save_config(training_config, "training_config.json")
-
-
-# ============================================================================
-# PREPARE DATASET
-# ============================================================================
-
-def prepare_dataset_safe(batch, max_duration=None):
-    """Memory-efficient dataset preparation."""
-    if max_duration is None:
-        max_duration = training_config.max_audio_duration_seconds
+def train_asr_model(
+    dataset_repo: str,
+    base_model: str,
+    output_name: str,
+    hf_username: Optional[str] = None,
+    num_epochs: int = 20,
+    target_batch_size: int = 32,
+    learning_rate: float = 3e-4,
+    safety_margin: float = 0.85,
+    use_deepspeed: bool = False,
+    push_to_hub: bool = True,
+    resume_from_checkpoint: Optional[str] = None
+):
+    """
+    Main entry point for ASR training.
+    """
     
-    is_batched = isinstance(batch["audio"], list)
-    if not is_batched:
-        batch = {k: [v] if k != "audio" else [v] for k, v in batch.items()}
-    
-    input_values_list = []
-    labels_list = []
-    
-    for audio, text in zip(batch["audio"], batch["cleaned_text"]):
-        try:
-            speech_array = audio["array"]
-            sampling_rate = audio["sampling_rate"]
-            duration = len(speech_array) / sampling_rate
-            
-            # Chunk long audio
-            if duration > max_duration:
-                chunk_length = int(max_duration * sampling_rate)
-                speech_array = speech_array[:chunk_length]
-            
-            # Process audio
-            processed = processor(
-                speech_array,
-                sampling_rate=sampling_rate,
-                padding=False,
-                return_tensors="np"
-            )
-            
-            input_values_list.append(processed.input_values[0])
-            
-            # Process labels
-            with processor.as_target_processor():
-                label_ids = processor(text).input_ids
-            labels_list.append(label_ids)
+    # 1. Setup
+    if hf_username is None:
+        # Try to infer from environment or default
+        hf_username = os.environ.get("HF_USERNAME", "nickoo004")
         
-        except Exception as e:
-            print(f"Error processing audio: {e}")
-            input_values_list.append(np.zeros(1000))
-            labels_list.append([processor.tokenizer.pad_token_id])
+    print(f"\n🚀 Initializing Training Pipeline")
+    print(f"   Model: {base_model}")
+    print(f"   Dataset: {dataset_repo}")
+    print(f"   DeepSpeed: {use_deepspeed}")
     
-    result = {
-        "input_values": input_values_list,
-        "labels": labels_list
-    }
+    # 2. Load Dataset
+    print(f"\nLoading dataset: {dataset_repo}")
+    raw_datasets = load_dataset(dataset_repo, token=True)
+    raw_datasets = raw_datasets.cast_column("audio", Audio(sampling_rate=16000))
     
-    if not is_batched:
-        result = {k: v[0] for k, v in result.items()}
-    
-    return result
+    if "test" not in raw_datasets:
+        print("Creating validation split...")
+        raw_datasets = raw_datasets["train"].train_test_split(test_size=0.1, seed=42)
 
+    # 3. Create Vocabulary & Processor
+    # (Simplified for brevity - in production we might load existing vocab)
+    def extract_all_chars(batch):
+        all_text = " ".join(batch["sentence"])
+        vocab = list(sorted(set(all_text)))
+        return {"vocab": [vocab], "all_text": [all_text]}
 
-print("\n🔄 Processing dataset...")
-
-processed_datasets = DatasetDict()
-
-for split_name in ["train", "test"]:
-    print(f"\nProcessing {split_name} split...")
-    
-    processed_datasets[split_name] = raw_datasets[split_name].map(
-        prepare_dataset_safe,
-        batched=False,
-        num_proc=1,
-        remove_columns=raw_datasets[split_name].column_names,
-        desc=f"Processing {split_name}",
-        load_from_cache_file=not training_config.cache_dataset
+    print("\nExtracting vocabulary...")
+    vocabs = raw_datasets.map(
+        extract_all_chars,
+        batched=True,
+        batch_size=1000,
+        keep_in_memory=False,
+        remove_columns=raw_datasets.column_names["train"]
     )
     
-    print(f"✅ {split_name} processed: {len(processed_datasets[split_name])} samples")
-    cleanup_memory()
-
-
-# ============================================================================
-# DATA COLLATOR
-# ============================================================================
-
-@dataclass
-class DataCollatorCTCWithPadding:
-    """Data collator that dynamically pads the inputs."""
-    processor: Wav2Vec2Processor
-    padding: Union[bool, str] = True
-    max_length: Optional[int] = None
-    max_length_labels: Optional[int] = None
-    pad_to_multiple_of: Optional[int] = None
-    pad_to_multiple_of_labels: Optional[int] = None
+    vocab_list = list(sorted(set(vocabs["train"]["vocab"][0]) | set(vocabs["test"]["vocab"][0])))
+    vocab_dict = {v: k for k, v in enumerate(vocab_list)}
+    vocab_dict["|"] = vocab_dict.get(" ", len(vocab_dict))
+    if " " in vocab_dict: del vocab_dict[" "]
+    vocab_dict["[UNK]"] = len(vocab_dict)
+    vocab_dict["[PAD]"] = len(vocab_dict)
     
-    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
-        input_features = [{"input_values": feature["input_values"]} for feature in features]
-        label_features = [{"input_ids": feature["labels"]} for feature in features]
+    # Save vocab
+    with open("vocab.json", "w", encoding="utf-8") as f:
+        json.dump(vocab_dict, f, ensure_ascii=False, indent=2)
         
-        batch = self.processor.pad(
-            input_features,
-            padding=self.padding,
-            max_length=self.max_length,
-            pad_to_multiple_of=self.pad_to_multiple_of,
-            return_tensors="pt",
-        )
-        
-        with self.processor.as_target_processor():
-            labels_batch = self.processor.pad(
-                label_features,
-                padding=self.padding,
-                max_length=self.max_length_labels,
-                pad_to_multiple_of=self.pad_to_multiple_of_labels,
-                return_tensors="pt",
-            )
-        
-        labels = labels_batch["input_ids"].masked_fill(
-            labels_batch.attention_mask.ne(1), -100
-        )
-        
-        batch["labels"] = labels
+    tokenizer = Wav2Vec2CTCTokenizer.from_pretrained("./", unk_token="[UNK]", pad_token="[PAD]", word_delimiter_token="|")
+    feature_extractor = Wav2Vec2FeatureExtractor(feature_size=1, sampling_rate=16000, padding_value=0.0, do_normalize=True, return_attention_mask=True)
+    processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
+    processor.save_pretrained("processor")
+
+    # 4. Load Model
+    print(f"\nLoading model: {base_model}")
+    model = Wav2Vec2ForCTC.from_pretrained(
+        base_model,
+        attention_dropout=0.1,
+        hidden_dropout=0.1,
+        feat_proj_dropout=0.0,
+        mask_time_prob=0.05,
+        layerdrop=0.1,
+        ctc_loss_reduction="mean",
+        pad_token_id=processor.tokenizer.pad_token_id,
+        vocab_size=len(processor.tokenizer),
+        gradient_checkpointing=True
+    )
+    model.freeze_feature_encoder()
+
+    # 5. AUTO-CONFIGURE
+    print("\n" + "="*80)
+    print("GENERATING OPTIMIZED CONFIGURATION".center(80))
+    print("="*80)
+    
+    training_config, config_manager = create_optimal_config(
+        dataset=raw_datasets['train'],
+        model=model,
+        model_name=output_name,
+        num_epochs=num_epochs,
+        target_batch_size=target_batch_size,
+        learning_rate=learning_rate,
+        safety_margin=safety_margin,
+        use_deepspeed=use_deepspeed  # Pass the flag!
+    )
+    
+    config_manager.save_config(training_config, "training_config.json")
+
+    # 6. Prepare Data
+    def prepare_dataset_safe(batch):
+        audio = batch["audio"]
+        batch["input_values"] = processor(audio["array"], sampling_rate=audio["sampling_rate"]).input_values[0]
+        with processor.as_target_processor():
+            batch["labels"] = processor(batch["sentence"]).input_ids
         return batch
 
+    print("\nProcessing dataset...")
+    processed_datasets = raw_datasets.map(
+        prepare_dataset_safe,
+        remove_columns=raw_datasets.column_names["train"],
+        num_proc=training_config.dataloader_num_workers or 1
+    )
 
-data_collator = DataCollatorCTCWithPadding(processor=processor, padding=True)
+    # 7. Training Arguments
+    training_args = TrainingArguments(
+        output_dir=output_name,
+        per_device_train_batch_size=training_config.per_device_train_batch_size,
+        per_device_eval_batch_size=training_config.per_device_eval_batch_size,
+        gradient_accumulation_steps=training_config.gradient_accumulation_steps,
+        learning_rate=training_config.learning_rate,
+        num_train_epochs=training_config.num_train_epochs,
+        fp16=training_config.fp16,
+        gradient_checkpointing=training_config.gradient_checkpointing,
+        evaluation_strategy="steps",
+        eval_steps=training_config.eval_steps,
+        save_steps=training_config.save_steps,
+        logging_steps=training_config.logging_steps,
+        push_to_hub=push_to_hub,
+        hub_model_id=f"{hf_username}/{output_name}",
+        report_to=["tensorboard"],
+        deepspeed=training_config.deepspeed_config if use_deepspeed else None # Inject DeepSpeed config!
+    )
 
-
-# ============================================================================
-# METRICS
-# ============================================================================
-
-wer_metric = load("wer")
-
-def compute_metrics(eval_pred):
-    """Compute WER metric."""
-    logits, labels = eval_pred
-    predictions = np.argmax(logits, axis=-1)
+    # 8. Trainer
+    data_collator = DataCollatorCTCWithPadding(processor=processor, padding=True)
     
-    decoded_preds = processor.batch_decode(predictions)
-    labels[labels == -100] = processor.tokenizer.pad_token_id
-    decoded_labels = processor.batch_decode(labels, group_tokens=False)
-    
-    wer = wer_metric.compute(predictions=decoded_preds, references=decoded_labels)
-    return {"wer": wer}
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=processed_datasets["train"],
+        eval_dataset=processed_datasets["test"],
+        tokenizer=processor.feature_extractor,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics,
+        callbacks=[AdaptiveMemoryCallback(config=training_config.__dict__)]
+    )
 
-
-# ============================================================================
-# MEMORY MONITOR CALLBACK
-# ============================================================================
-
-class AdaptiveMemoryCallback(TrainerCallback):
-    """Advanced memory monitoring and adaptive batch sizing."""
+    # 9. Train
+    print("\n" + "="*80)
+    print("STARTING TRAINING".center(80))
+    print("="*80)
     
-    def __init__(self, config: dict):
-        self.config = config
-        self.oom_count = 0
-        self.max_oom_retries = 3
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     
-    def on_step_begin(self, args, state, control, **kwargs):
-        """Check memory before each step."""
-        mem_info = get_memory_info()
+    # 10. Finish
+    print("\nSaving final model...")
+    trainer.save_model()
+    processor.save_pretrained(output_name)
+    
+    if push_to_hub:
+        trainer.push_to_hub()
         
-        # Warn if memory usage is high
-        if mem_info['cpu_percent'] > 90:
-            print(f"\n⚠️ High CPU memory usage: {mem_info['cpu_percent']:.1f}%")
-            cleanup_memory()
-        
-        if torch.cuda.is_available() and mem_info['gpu_percent'] > self.config['max_memory_usage_percent']:
-            print(f"\n⚠️ High GPU memory usage: {mem_info['gpu_percent']:.1f}%")
-            cleanup_memory()
-        
-        return control
-    
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        """Log memory status periodically."""
-        if state.global_step % 100 == 0:
-            mem_info = get_memory_info()
-            logs = logs or {}
-            logs['cpu_memory_percent'] = mem_info['cpu_percent']
-            if torch.cuda.is_available():
-                logs['gpu_memory_percent'] = mem_info['gpu_percent']
-                logs['gpu_memory_gb'] = mem_info['gpu_used_gb']
-        return control
+    print("\n🎉 Training Complete!")
 
+if __name__ == "__main__":
+    # Default behavior if run directly
+    train_asr_model(
+        dataset_repo="nickoo004/karakalpak-speech-60h-production-v2",
+        base_model="facebook/wav2vec2-xls-r-1b",
+        output_name="wav2vec2-xls-r-1b-karakalpak-v2-60h"
+    )
 
-# ============================================================================
-# TRAINING ARGUMENTS (USING AUTO-CONFIG!)
-# ============================================================================
-
-print("\n⚙️  Creating TrainingArguments with optimized settings...")
-
-training_args = TrainingArguments(
-    # Output
-    output_dir=MODEL_NAME,
-    logging_dir=f"{MODEL_NAME}/logs",
-    
-    # Batch configuration (AUTO-OPTIMIZED!)
-    per_device_train_batch_size=training_config.per_device_train_batch_size,
-    per_device_eval_batch_size=training_config.per_device_eval_batch_size,
-    gradient_accumulation_steps=training_config.gradient_accumulation_steps,
-    
-    # Memory optimizations (AUTO-OPTIMIZED!)
-    gradient_checkpointing=training_config.gradient_checkpointing,
-    fp16=training_config.fp16,
-    optim="adafactor",
-    
-    # Training parameters
-    num_train_epochs=training_config.num_train_epochs,
-    learning_rate=training_config.learning_rate,
-    warmup_steps=training_config.warmup_steps,
-    
-    # Evaluation (AUTO-OPTIMIZED!)
-    eval_strategy="steps",
-    eval_steps=training_config.eval_steps,
-    save_steps=training_config.save_steps,
-    save_total_limit=2,
-    load_best_model_at_end=True,
-    metric_for_best_model="wer",
-    greater_is_better=False,
-    
-    # Data loading (AUTO-OPTIMIZED!)
-    dataloader_num_workers=training_config.dataloader_num_workers,
-    dataloader_pin_memory=False,
-    
-    # Other
-    remove_unused_columns=False,
-    push_to_hub=True,
-    hub_model_id=f"{HF_USERNAME}/{MODEL_NAME}",
-    hub_private_repo=True,
-    
-    # Logging (AUTO-OPTIMIZED!)
-    logging_steps=training_config.logging_steps,
-    logging_first_step=True,
-    report_to=["tensorboard"],
-    
-    # Reproducibility
-    seed=42,
-)
-
-print("✅ TrainingArguments created with auto-optimized settings!")
-
-
-# ============================================================================
-# CREATE TRAINER
-# ============================================================================
-
-print("\n🔄 Creating Trainer...")
-
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=processed_datasets["train"],
-    eval_dataset=processed_datasets["test"],
-    data_collator=data_collator,
-    compute_metrics=compute_metrics,
-    tokenizer=processor.feature_extractor,
-    callbacks=[AdaptiveMemoryCallback(config=training_config.__dict__)]
-)
-
-print("✅ Trainer created with adaptive memory monitoring!")
-
-
-# ============================================================================
-# TRAINING WITH AUTO-RECOVERY
-# ============================================================================
-
-print("\n" + "="*80)
-print("STARTING OPTIMIZED TRAINING".center(80))
-print("="*80)
-print("\nFeatures enabled:")
-print("  ✅ Auto-optimized batch sizes")
-print("  ✅ Adaptive memory management")
-print("  ✅ Dynamic gradient accumulation")
-print("  ✅ Real-time memory monitoring")
-print("  ✅ Automatic checkpoint recovery")
-print("\n" + "="*80 + "\n")
-
-max_retries = 3
-retry_count = 0
-
-while retry_count < max_retries:
-    try:
-        cleanup_memory()
-        print_memory_status("Before training")
-        
-        # Start training
-        trainer.train()
-        
-        print("\n" + "="*80)
-        print("TRAINING COMPLETED SUCCESSFULLY! 🎉".center(80))
-        print("="*80)
-        break
-    
-    except RuntimeError as e:
-        if "out of memory" in str(e).lower() or "bad_alloc" in str(e).lower():
-            retry_count += 1
-            print(f"\n⚠️ Memory error encountered (attempt {retry_count}/{max_retries})")
-            print("Attempting recovery...")
-            
-            cleanup_memory()
-            
-            # Reduce batch size
-            if trainer.args.per_device_train_batch_size > 1:
-                trainer.args.per_device_train_batch_size //= 2
-                trainer.args.per_device_eval_batch_size //= 2
-                print(f"Reduced batch size to {trainer.args.per_device_train_batch_size}")
-            
-            if retry_count >= max_retries:
-                print("❌ Maximum retries reached. Training failed.")
-                raise
-        else:
-            raise
-
-
-# ============================================================================
-# EVALUATION AND SAVING
-# ============================================================================
-
-print("\n📊 Running final evaluation...")
-final_metrics = trainer.evaluate()
-
-print("\n" + "="*60)
-print("FINAL RESULTS")
-print("="*60)
-for key, value in final_metrics.items():
-    if isinstance(value, float):
-        print(f"{key}: {value:.4f}")
-    else:
-        print(f"{key}: {value}")
-print("="*60)
-
-# Save model and processor
-print("\n💾 Saving model and processor...")
-trainer.save_model()
-processor.save_pretrained(MODEL_NAME)
-
-# Push to Hub
-if training_args.push_to_hub:
-    print("\n☁️ Pushing to Hugging Face Hub...")
-    trainer.push_to_hub()
-    print(f"✅ Model available at: https://huggingface.co/{HF_USERNAME}/{MODEL_NAME}")
-
-print("\n🎉 ALL DONE! Your model has been trained with high-architecture optimization!")
-
-cleanup_memory()
-print_memory_status("Final")

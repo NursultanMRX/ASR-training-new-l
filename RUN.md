@@ -486,18 +486,6 @@ During training, monitor:
 - [ ] Loss is decreasing
 - [ ] WER is improving
 - [ ] No OOM errors
-- [ ] Checkpoints being saved
-- [ ] GPU utilization is high
-
----
-
-## ⚡ Quick Commands Reference
-
-```bash
-# Install dependencies
-pip install transformers datasets accelerate torchaudio evaluate psutil
-
-# Run training (simplest)
 cd src && python optimized_training.py
 
 # Monitor with TensorBoard
