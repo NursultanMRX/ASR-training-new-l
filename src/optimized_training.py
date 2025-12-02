@@ -237,19 +237,29 @@ def train_asr_model(
         learning_rate = config.learning_rate if learning_rate is None else learning_rate
         target_batch_size = config.per_device_train_batch_size if target_batch_size is None else target_batch_size
     else:
-        # Create config from parameters
+        # Create config from parameters with proper defaults
         if not all([dataset_repo, base_model, output_name]):
             raise ValueError("Must provide either config_file OR (dataset_repo + base_model + output_name)")
+        
+        # Apply defaults for None values
+        if num_epochs is None:
+            num_epochs = 20
+        if learning_rate is None:
+            learning_rate = 3e-4
+        if target_batch_size is None:
+            target_batch_size = 32
+        if push_to_hub is None:
+            push_to_hub = True
         
         config = TrainingConfig(
             model_name_or_path=base_model,
             dataset_name=dataset_repo,
             output_dir=output_name,
             hf_token=hf_token,
-            push_to_hub=push_to_hub if push_to_hub is not None else True,
-            num_train_epochs=num_epochs if num_epochs is not None else 20,
-            learning_rate=learning_rate if learning_rate is not None else 3e-4,
-            per_device_train_batch_size=target_batch_size if target_batch_size is not None else 32
+            push_to_hub=push_to_hub,
+            num_train_epochs=num_epochs,
+            learning_rate=learning_rate,
+            per_device_train_batch_size=target_batch_size
         )
     
     # ============================================================================
