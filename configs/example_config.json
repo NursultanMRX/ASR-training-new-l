@@ -1,0 +1,33 @@
+{
+    "model_name_or_path": "facebook/wav2vec2-xls-r-1b",
+    "dataset_name": "nickoo004/karakalpak-speech-60h-production-v2",
+    "output_dir": "./wav2vec2-xls-r-1b-karakalpak-finetuned",
+    "overwrite_output_dir": true,
+    "push_to_hub": true,
+    "hub_model_id": "nickoo004/wav2vec2-xls-r-1b-karakalpak",
+    "hf_token": "",
+    "audio_column_name": "audio",
+    "text_column_name": "text",
+    "speaker_id_column_name": null,
+    "filter_on_speaker_id": null,
+    "max_duration_in_seconds": 20.0,
+    "min_duration_in_seconds": 1.0,
+    "num_train_epochs": 30,
+    "per_device_train_batch_size": 8,
+    "learning_rate": 0.0003,
+    "warmup_ratio": 0.1,
+    "gradient_accumulation_steps": 2,
+    "gradient_checkpointing": true,
+    "group_by_length": true,
+    "do_train": true,
+    "do_eval": true,
+    "evaluation_strategy": "steps",
+    "eval_steps": 400,
+    "save_steps": 400,
+    "logging_steps": 50,
+    "fp16": true,
+    "seed": 42
+}
+
+
+// python src/cli.py train --config=configs/example_config.json

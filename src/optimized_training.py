@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Union
 from evaluate import load
 
 from asr_config_manager import create_optimal_config, ASRConfigManager
+from config_loader import load_config_from_json, TrainingConfig, print_config
 from transformers import (
     Wav2Vec2CTCTokenizer,
     Wav2Vec2FeatureExtractor,
@@ -182,16 +183,18 @@ class AdaptiveMemoryCallback(TrainerCallback):
 # ============================================================================
 
 def train_asr_model(
-    dataset_repo: str,
-    base_model: str,
-    output_name: str,
+    dataset_repo: str = None,
+    base_model: str = None,
+    output_name: str = None,
+    config_file: Optional[str] = None,
     hf_username: Optional[str] = None,
-    num_epochs: int = 20,
-    target_batch_size: int = 32,
-    learning_rate: float = 3e-4,
+    hf_token: Optional[str] = None,
+    num_epochs: int = None,
+    target_batch_size: int = None,
+    learning_rate: float = None,
     safety_margin: float = 0.85,
     use_deepspeed: bool = False,
-    push_to_hub: bool = True,
+    push_to_hub: bool = None,
     resume_from_checkpoint: Optional[str] = None,
     skip_health_check: bool = False
 ):
@@ -199,10 +202,12 @@ def train_asr_model(
     Main entry point for ASR training with comprehensive error recovery.
     
     Args:
-        dataset_repo: HuggingFace dataset repository ID
-        base_model: Base model to fine-tune
-        output_name: Output directory name
+        dataset_repo: HuggingFace dataset repository ID (optional if using config_file)
+        base_model: Base model to fine-tune (optional if using config_file)
+        output_name: Output directory name (optional if using config_file)
+        config_file: Path to JSON configuration file (takes precedence over individual params)
         hf_username: HuggingFace username (auto-detected if None)
+        hf_token: HuggingFace API token for private datasets/models
         num_epochs: Number of training epochs
         target_batch_size: Target effective batch size
         learning_rate: Learning rate
@@ -212,6 +217,40 @@ def train_asr_model(
         resume_from_checkpoint: Path to checkpoint to resume from
         skip_health_check: Skip pre-flight health checks (not recommended)
     """
+    
+    # ============================================================================
+    # 0. LOAD CONFIGURATION (JSON or Parameters)
+    # ============================================================================
+    
+    if config_file:
+        print(f"\n📄 Loading configuration from JSON file: {config_file}")
+        config = load_config_from_json(config_file)
+        print_config(config)
+        
+        # Extract main parameters from config
+        dataset_repo = config.dataset_name
+        base_model = config.model_name_or_path
+        output_name = config.output_dir
+        hf_token = config.hf_token or hf_token
+        push_to_hub = config.push_to_hub if push_to_hub is None else push_to_hub
+        num_epochs = config.num_train_epochs if num_epochs is None else num_epochs
+        learning_rate = config.learning_rate if learning_rate is None else learning_rate
+        target_batch_size = config.per_device_train_batch_size if target_batch_size is None else target_batch_size
+    else:
+        # Create config from parameters
+        if not all([dataset_repo, base_model, output_name]):
+            raise ValueError("Must provide either config_file OR (dataset_repo + base_model + output_name)")
+        
+        config = TrainingConfig(
+            model_name_or_path=base_model,
+            dataset_name=dataset_repo,
+            output_dir=output_name,
+            hf_token=hf_token,
+            push_to_hub=push_to_hub if push_to_hub is not None else True,
+            num_train_epochs=num_epochs if num_epochs is not None else 20,
+            learning_rate=learning_rate if learning_rate is not None else 3e-4,
+            per_device_train_batch_size=target_batch_size if target_batch_size is not None else 32
+        )
     
     # ============================================================================
     # 0. PRE-FLIGHT CHECKS & ERROR RECOVERY SETUP
@@ -267,17 +306,65 @@ def train_asr_model(
     
     # 2. Load Dataset
     print(f"\nLoading dataset: {dataset_repo}")
-    raw_datasets = load_dataset(dataset_repo, token=True)
-    raw_datasets = raw_datasets.cast_column("audio", Audio(sampling_rate=16000))
+    
+    # Use HF token if provided
+    load_kwargs = {"token": hf_token} if hf_token else {"token": True}
+    
+    try:
+        raw_datasets = load_dataset(dataset_repo, **load_kwargs)
+    except Exception as e:
+        print(f"⚠️ Failed to load with authentication, trying without token...")
+        raw_datasets = load_dataset(dataset_repo)
+    
+    # Cast audio column (use configured column name or default)
+    audio_col = config.audio_column_name if hasattr(config, 'audio_column_name') else "audio"
+    raw_datasets = raw_datasets.cast_column(audio_col, Audio(sampling_rate=16000))
+    
+    # Apply speaker filtering if specified
+    if config.filter_on_speaker_id and config.speaker_id_column_name:
+        print(f"\n🎯 Filtering for speaker: {config.filter_on_speaker_id}")
+        raw_datasets = raw_datasets.filter(
+            lambda x: x[config.speaker_id_column_name] == config.filter_on_speaker_id
+        )
+        print(f"   Kept {len(raw_datasets['train'])} samples for speaker {config.filter_on_speaker_id}")
+    
+    # Apply duration filtering
+    def filter_by_duration(batch):
+        """Filter audio by duration."""
+        audio = batch[audio_col]
+        duration = len(audio['array']) / audio['sampling_rate']
+        return config.min_duration_in_seconds <= duration <= config.max_duration_in_seconds
+    
+    if config.max_duration_in_seconds or config.min_duration_in_seconds:
+        print(f"\n⏱️ Filtering by duration: {config.min_duration_in_seconds}s - {config.max_duration_in_seconds}s")
+        before_count = len(raw_datasets['train'])
+        raw_datasets = raw_datasets.filter(filter_by_duration)
+        after_count = len(raw_datasets['train'])
+        print(f"   Kept {after_count}/{before_count} samples ({100*after_count/before_count:.1f}%)")
     
     if "test" not in raw_datasets:
         print("Creating validation split...")
         raw_datasets = raw_datasets["train"].train_test_split(test_size=0.1, seed=42)
 
     # 3. Create Vocabulary & Processor
+    # Determine which text column to use
+    text_column = None
+    if config.text_column_name and config.text_column_name in raw_datasets['train'].column_names:
+        text_column = config.text_column_name
+        print(f"\n📝 Using text column: '{text_column}'")
+    elif "sentence" in raw_datasets['train'].column_names:
+        text_column = "sentence"
+        print(f"\n📝 Using legacy sentence column (backward compatibility)")
+    elif "text" in raw_datasets['train'].column_names:
+        text_column = "text"
+        print(f"\n📝 Auto-detected text column: 'text'")
+    else:
+        raise ValueError(f"Could not find text column in dataset. Available columns: {raw_datasets['train'].column_names}")
+    
     # (Simplified for brevity - in production we might load existing vocab)
     def extract_all_chars(batch):
-        all_text = " ".join(batch["sentence"])
+        all_text = " ".join(batch[text_column])
+
         vocab = list(sorted(set(all_text)))
         return {"vocab": [vocab], "all_text": [all_text]}
 
@@ -342,17 +429,17 @@ def train_asr_model(
 
     # 6. Prepare Data
     def prepare_dataset_safe(batch):
-        audio = batch["audio"]
+        audio = batch[audio_col]
         batch["input_values"] = processor(audio["array"], sampling_rate=audio["sampling_rate"]).input_values[0]
         with processor.as_target_processor():
-            batch["labels"] = processor(batch["sentence"]).input_ids
+            batch["labels"] = processor(batch[text_column]).input_ids
         return batch
 
     print("\nProcessing dataset...")
     processed_datasets = raw_datasets.map(
         prepare_dataset_safe,
         remove_columns=raw_datasets.column_names["train"],
-        num_proc=training_config.dataloader_num_workers or 1
+        num_proc=config.dataloader_num_workers or 1
     )
 
     # 7. Training Arguments

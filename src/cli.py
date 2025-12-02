@@ -27,26 +27,30 @@ class ASRCLI:
     
     def train(
         self,
-        dataset_repo: str = "nickoo004/karakalpak-speech-60h-production-v2",
-        model_name: str = "facebook/wav2vec2-xls-r-1b",
-        output_dir: str = "asr-model-output",
+        config: str = None,
+        dataset_repo: str = None,
+        model_name: str = None,
+        output_dir: str = None,
         hf_username: str = None,
-        epochs: int = 20,
-        batch_size: int = 32,
-        learning_rate: float = 3e-4,
+        hf_token: str = None,
+        epochs: int = None,
+        batch_size: int = None,
+        learning_rate: float = None,
         safety_margin: float = 0.85,
         use_deepspeed: bool = False,
-        push_to_hub: bool = True,
+        push_to_hub: bool = None,
         resume_from_checkpoint: str = None
     ):
         """
         Start ASR training with auto-configuration.
         
         Args:
+            config: Path to JSON configuration file (takes precedence over other params)
             dataset_repo: HuggingFace dataset repository ID
             model_name: Base model to fine-tune
             output_dir: Directory to save results
             hf_username: Your HuggingFace username (optional, tries to infer)
+            hf_token: HuggingFace API token for private datasets/models
             epochs: Number of training epochs
             batch_size: Target effective batch size
             learning_rate: Learning rate
@@ -56,16 +60,23 @@ class ASRCLI:
             resume_from_checkpoint: Path to checkpoint to resume from
         """
         print(f"\n🚀 Starting ASR Training System")
-        print(f"   Model: {model_name}")
-        print(f"   Dataset: {dataset_repo}")
+        
+        if config:
+            print(f"   Configuration: {config}")
+        else:
+            print(f"   Model: {model_name or 'Not specified'}")
+            print(f"   Dataset: {dataset_repo or 'Not specified'}")
+        
         print(f"   DeepSpeed: {'Enabled ✅' if use_deepspeed else 'Disabled ❌'}")
         
         # Call the main training function
         train_asr_model(
+            config_file=config,
             dataset_repo=dataset_repo,
             base_model=model_name,
             output_name=output_dir,
             hf_username=hf_username,
+            hf_token=hf_token,
             num_epochs=epochs,
             target_batch_size=batch_size,
             learning_rate=learning_rate,

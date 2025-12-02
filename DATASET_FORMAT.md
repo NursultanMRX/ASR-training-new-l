@@ -8,16 +8,32 @@ This guide explains the exact dataset format required to use the ASR training sy
 
 ## ✅ Required Dataset Structure
 
-### Minimum Required Columns
+### 🆕 NEW: Updated Column Names (Recommended)
 
-Your dataset **MUST** have these columns:
+Starting from the latest version, the system supports flexible column naming! The recommended format now uses:
+
+| Column Name | Type | Description | Example |
+|-------------|------|-------------|---------|
+| `audio` | Audio | Audio file (WAV, MP3, FLAC) | `{"path": "audio_1.wav", "array": [...], "sampling_rate": 16000}` |
+| `text` | String | Original text transcription | `"Hello world"` |
+| `cleaned_text` | String | Cleaned/normalized text (optional) | `"hello world"` |
+
+**Benefits of the new format:**
+- ✅ Separate original and cleaned text
+- ✅ Better for TTS (Text-to-Speech) training
+- ✅ Supports speaker information
+- ✅ More flexible column mapping
+
+### Minimum Required Columns (Legacy Support)
+
+The system also supports the legacy format with just 2 columns:
 
 | Column Name | Type | Description | Example |
 |-------------|------|-------------|---------|
 | `audio` | Audio | Audio file (WAV, MP3, FLAC) | `{"path": "audio_1.wav", "array": [...], "sampling_rate": 16000}` |
 | `sentence` | String | Text transcription | `"Hello world"` |
 
-**That's it!** Just 2 columns minimum.
+**Note:** The system automatically detects which format you're using!
 
 ---
 
@@ -268,6 +284,16 @@ train_asr_model(
 {
   "audio": {"path": "my_audio.wav", "array": [...], "sampling_rate": 16000},
   "sentence": "hello world this is a test"
+}
+```
+
+### 4. New Format with Text & Cleaned Text
+```json
+{
+  "audio": {"path": "audio_001.wav", "array": [...], "sampling_rate": 16000},
+  "text": "Hello, how are you?",
+  "cleaned_text": "hello how are you",
+  "speaker_name": "Speaker_1"
 }
 ```
 
