@@ -149,7 +149,17 @@ def compute_metrics(eval_pred):
     
     # Decode predictions - handle the processor globally
     # This will be set in the trainer
-    return {"wer": 0.0}  # Placeholder - will be computed by trainer
+    pred_ids = np.argmax(logits, axis=-1)
+    
+    # Labeldagi -100 larni (padding) asl holiga qaytarish
+    label_ids = labels.copy()
+    label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
+
+    pred_str = processor.batch_decode(pred_ids)
+    label_str = processor.batch_decode(label_ids, group_tokens=False)
+
+    wer = wer_metric.compute(predictions=pred_str, references=label_str)
+    return {"wer": wer}
 
 
 # ============================================================================
@@ -382,12 +392,21 @@ def train_asr_model(
     vocabs = raw_datasets.map(
         extract_all_chars,
         batched=True,
-        batch_size=1000,
+        batch_size=100,
         keep_in_memory=False,
         remove_columns=raw_datasets.column_names["train"]
     )
     
-    vocab_list = list(sorted(set(vocabs["train"]["vocab"][0]) | set(vocabs["test"]["vocab"][0])))
+    # Collect vocab from ALL batches
+    vocab_set = set()
+    for batch_vocab in vocabs["train"]["vocab"]:
+        vocab_set.update(batch_vocab)
+    if "test" in vocabs:
+        for batch_vocab in vocabs["test"]["vocab"]:
+            vocab_set.update(batch_vocab)
+    
+    vocab_list = list(sorted(vocab_set))
+    
     vocab_dict = {v: k for k, v in enumerate(vocab_list)}
     vocab_dict["|"] = vocab_dict.get(" ", len(vocab_dict))
     if " " in vocab_dict: del vocab_dict[" "]
@@ -449,7 +468,8 @@ def train_asr_model(
     processed_datasets = raw_datasets.map(
         prepare_dataset_safe,
         remove_columns=raw_datasets.column_names["train"],
-        num_proc=config.dataloader_num_workers or 1
+        # num_proc=config.dataloader_num_workers or 1
+        num_proc=1
     )
 
     # 7. Training Arguments
