@@ -345,7 +345,7 @@ def train_asr_model(
         duration = len(audio['array']) / audio['sampling_rate']
         return config.min_duration_in_seconds <= duration <= config.max_duration_in_seconds
     
-    if config.max_duration_in_seconds or config.min_duration_in_seconds:
+    if False:
         print(f"\n⏱️ Filtering by duration: {config.min_duration_in_seconds}s - {config.max_duration_in_seconds}s")
         before_count = len(raw_datasets['train'])
         raw_datasets = raw_datasets.filter(filter_by_duration, num_proc=1)
