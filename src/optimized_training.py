@@ -365,9 +365,9 @@ def train_asr_model(
     elif "sentence" in raw_datasets['train'].column_names:
         text_column = "sentence"
         print(f"\n📝 Using legacy sentence column (backward compatibility)")
-    elif "text" in raw_datasets['train'].column_names:
-        text_column = "text"
-        print(f"\n📝 Auto-detected text column: 'text'")
+    elif "cleaned_text" in raw_datasets['train'].column_names:
+        text_column = "cleaned_text"
+        print(f"\n📝 Auto-detected cleaned_text column: 'cleaned_text'")
     else:
         raise ValueError(f"Could not find text column in dataset. Available columns: {raw_datasets['train'].column_names}")
     
@@ -507,7 +507,7 @@ if __name__ == "__main__":
     # Default behavior if run directly
     train_asr_model(
         dataset_repo="nickoo004/karakalpak-speech-60h-production-v2",
-        base_model="facebook/wav2vec2-xls-r-1b",
-        output_name="wav2vec2-xls-r-1b-karakalpak-v2-60h"
+        base_model="facebook/wav2vec2-xls-r-300m",
+        output_name="wav2vec2-xls-r-300m-karakalpak-v2-60h"
     )
 

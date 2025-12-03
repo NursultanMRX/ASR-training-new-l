@@ -7,7 +7,7 @@
     "hub_model_id": "nickoo004/wav2vec2-xls-r-1b-karakalpak",
     "hf_token": "",
     "audio_column_name": "audio",
-    "text_column_name": "text",
+    "text_column_name": "cleaned_text",
     "speaker_id_column_name": null,
     "filter_on_speaker_id": null,
     "max_duration_in_seconds": 20.0,
