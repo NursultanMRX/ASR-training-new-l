@@ -348,7 +348,7 @@ def train_asr_model(
     if config.max_duration_in_seconds or config.min_duration_in_seconds:
         print(f"\n⏱️ Filtering by duration: {config.min_duration_in_seconds}s - {config.max_duration_in_seconds}s")
         before_count = len(raw_datasets['train'])
-        raw_datasets = raw_datasets.filter(filter_by_duration)
+        raw_datasets = raw_datasets.filter(filter_by_duration, num_proc=1)
         after_count = len(raw_datasets['train'])
         print(f"   Kept {after_count}/{before_count} samples ({100*after_count/before_count:.1f}%)")
     
